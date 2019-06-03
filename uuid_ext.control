@@ -1,0 +1,5 @@
+# Extended UUID functions
+comment = 'UUID functions'
+default_version = '1.0'
+module_pathname = '$libdir/uuid_ext'
+relocatable = true
