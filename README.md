@@ -80,9 +80,9 @@ make
 
 This also requires [PGXS][6] as it figures out where to find the installation:
 
-´´´
+```
 sudo make install
-´´´
+```
 
 
 [1]: https://tools.ietf.org/html/rfc4122
