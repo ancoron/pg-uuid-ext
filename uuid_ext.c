@@ -83,9 +83,7 @@ uuid_is_rfc_v1_internal(pg_uuid_t *uuid)
 Datum
 uuid_to_timestamp(PG_FUNCTION_ARGS)
 {
-    int64               msb = 0L;
-    float8              seconds;
-    TimestampTz         result;
+    TimestampTz         timestamp = 0L;
 	pg_uuid_t           *uuid = PG_GETARG_UUID_P(0);
 
     if (PG_ARGISNULL(0))
@@ -96,29 +94,27 @@ uuid_to_timestamp(PG_FUNCTION_ARGS)
         PG_RETURN_NULL();
 
     /* extract shuffled 60 bits to get the UUID timestamp */
-    msb |= ( ((int64) uuid->data[6] & 0x0F) << 56 );
-    msb |= ( ((int64) uuid->data[7]) << 48 );
-    msb |= ( ((int64) uuid->data[4]) << 40 );
-    msb |= ( ((int64) uuid->data[5]) << 32 );
-    msb |= ( ((int64) uuid->data[0]) << 24 );
-    msb |= ( ((int64) uuid->data[1]) << 16 );
-    msb |= ( ((int64) uuid->data[2]) << 8 );
-    msb |= ((int64) uuid->data[3]);
+    timestamp |= ( ((int64) uuid->data[6] & 0x0F) << 56 );
+    timestamp |= ( ((int64) uuid->data[7]) << 48 );
+    timestamp |= ( ((int64) uuid->data[4]) << 40 );
+    timestamp |= ( ((int64) uuid->data[5]) << 32 );
+    timestamp |= ( ((int64) uuid->data[0]) << 24 );
+    timestamp |= ( ((int64) uuid->data[1]) << 16 );
+    timestamp |= ( ((int64) uuid->data[2]) << 8 );
+    timestamp |= ( (int64) uuid->data[3] );
 
     /* from 100 ns precision to PostgreSQL epoch */
-    seconds = (msb - UUID_TIME_OFFSET);
-    seconds /= 10000000;
-    seconds -= ((POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * SECS_PER_DAY);
-    seconds = rint(seconds * USECS_PER_SEC);
-    result = (int64) seconds;
+    timestamp -= UUID_TIME_OFFSET;
+    timestamp /= 10;
+    timestamp -= ((POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * SECS_PER_DAY * USECS_PER_SEC);
 
     /* Recheck in case roundoff produces something just out of range */
-    if (!IS_VALID_TIMESTAMP(result))
+    if (!IS_VALID_TIMESTAMP(timestamp))
         ereport(ERROR,
                 (errcode(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
-                 errmsg("timestamp out of range: \"%g\"", seconds)));
+                 errmsg("timestamp out of range: \"%ld\"", timestamp)));
 
-	PG_RETURN_TIMESTAMP(result);
+	PG_RETURN_TIMESTAMP(timestamp);
 }
 
 /*
