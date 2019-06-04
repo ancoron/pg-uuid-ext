@@ -85,9 +85,9 @@ sudo make install
 ´´´
 
 
-[1] https://tools.ietf.org/html/rfc4122
-[2] https://www.postgresql.org/docs/current/datatype-datetime.html
-[3] https://tools.ietf.org/html/rfc4122#section-4.1.3
-[4] https://tools.ietf.org/html/rfc4122#section-4.1.1
-[5] https://docs.microsoft.com/en-us/windows/desktop/com/clsid-key-hklm
-[6] https://www.postgresql.org/docs/current/extend-pgxs.html
+[1]: https://tools.ietf.org/html/rfc4122
+[2]: https://www.postgresql.org/docs/current/datatype-datetime.html
+[3]: https://tools.ietf.org/html/rfc4122#section-4.1.3
+[4]: https://tools.ietf.org/html/rfc4122#section-4.1.1
+[5]: https://docs.microsoft.com/en-us/windows/desktop/com/clsid-key-hklm
+[6]: https://www.postgresql.org/docs/current/extend-pgxs.html
