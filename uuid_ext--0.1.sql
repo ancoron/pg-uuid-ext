@@ -17,14 +17,18 @@
 -- complain if script is sourced in psql, rather than via CREATE EXTENSION
 \echo Use "CREATE EXTENSION uuid_ext" to load this file. \quit
 
-CREATE FUNCTION uuid_to_timestamp(uuid) RETURNS timestamp with time zone
-AS 'MODULE_PATHNAME', 'uuid_to_timestamp'
-LANGUAGE C STRICT PARALLEL SAFE;
-
 CREATE FUNCTION uuid_version(uuid) RETURNS integer
 AS 'MODULE_PATHNAME', 'uuid_version'
 LANGUAGE C STRICT PARALLEL SAFE;
 
 CREATE FUNCTION uuid_variant(uuid) RETURNS integer
 AS 'MODULE_PATHNAME', 'uuid_variant'
+LANGUAGE C STRICT PARALLEL SAFE;
+
+CREATE FUNCTION uuid_v1_timestamp(uuid) RETURNS timestamp with time zone
+AS 'MODULE_PATHNAME', 'uuid_v1_timestamp'
+LANGUAGE C STRICT PARALLEL SAFE;
+
+CREATE FUNCTION uuid_v1_node(uuid) RETURNS varchar
+AS 'MODULE_PATHNAME', 'uuid_v1_node'
 LANGUAGE C STRICT PARALLEL SAFE;

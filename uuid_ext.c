@@ -22,6 +22,8 @@
 #include "fmgr.h"
 #include "port.h"
 #include "datatype/timestamp.h"
+#include "lib/stringinfo.h"
+#include "utils/builtins.h"
 #include "utils/uuid.h"
 #include "utils/timestamp.h"
 
@@ -44,9 +46,10 @@ static uint8 uuid_version_internal(pg_uuid_t *uuid);
 static uint8 uuid_variant_internal(pg_uuid_t *uuid);
 static bool uuid_is_rfc_v1_internal(pg_uuid_t *uuid);
 
-PG_FUNCTION_INFO_V1(uuid_to_timestamp);
+PG_FUNCTION_INFO_V1(uuid_v1_timestamp);
 PG_FUNCTION_INFO_V1(uuid_version);
 PG_FUNCTION_INFO_V1(uuid_variant);
+PG_FUNCTION_INFO_V1(uuid_v1_node);
 
 static uint8
 uuid_version_internal(pg_uuid_t *uuid)
@@ -81,7 +84,7 @@ uuid_is_rfc_v1_internal(pg_uuid_t *uuid)
  *
  */
 Datum
-uuid_to_timestamp(PG_FUNCTION_ARGS)
+uuid_v1_timestamp(PG_FUNCTION_ARGS)
 {
     TimestampTz         timestamp = 0L;
 	pg_uuid_t           *uuid = PG_GETARG_UUID_P(0);
@@ -147,4 +150,42 @@ uuid_variant(PG_FUNCTION_ARGS)
         PG_RETURN_NULL();
 
     PG_RETURN_TIMESTAMP(uuid_variant_internal(uuid));
+}
+
+/*
+ * uuid_v1_node
+ *	extract the node of a version 1 UUID (returns NULL otherwise)
+ *
+ */
+Datum
+uuid_v1_node(PG_FUNCTION_ARGS)
+{
+	pg_uuid_t        *uuid = PG_GETARG_UUID_P(0);
+	static const char hex_chars[] = "0123456789abcdef";
+	char*             node = malloc(13);
+	int               i;
+	int               j = 0;
+
+    if (PG_ARGISNULL(0))
+        PG_RETURN_NULL();
+
+    /* version and variant check */
+    if (!uuid_is_rfc_v1_internal(uuid))
+        PG_RETURN_NULL();
+
+	for (i = 10; i < UUID_LEN; i++)
+	{
+		int			hi;
+		int			lo;
+
+		hi = uuid->data[i] >> 4;
+		lo = uuid->data[i] & 0x0F;
+
+		node[j++] = hex_chars[hi];
+		node[j++] = hex_chars[lo];
+	}
+
+    node[j++] = '\0';
+
+	PG_RETURN_TEXT_P(cstring_to_text(node));
 }

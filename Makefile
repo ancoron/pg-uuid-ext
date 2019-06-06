@@ -10,7 +10,7 @@ OBJS = uuid_ext.o
 EXTENSION = uuid_ext
 
 # Which SQL to execution at "CREATE EXTENSION ..."
-DATA = uuid_ext--1.0.sql
+DATA = uuid_ext--0.1.sql
 
 # pg_regress settings
 REGRESS_PORT := 5432
