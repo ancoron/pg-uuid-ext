@@ -115,7 +115,7 @@ uuid_v1_timestamp(PG_FUNCTION_ARGS)
     if (!IS_VALID_TIMESTAMP(timestamp))
         ereport(ERROR,
                 (errcode(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
-                 errmsg("timestamp out of range: \"%ld\"", timestamp)));
+                 errmsg("timestamp out of range")));
 
 	PG_RETURN_TIMESTAMP(timestamp);
 }
