@@ -82,7 +82,7 @@ gt_clock | 1
 lt_node  | -1
 gt_node  | 1
 
-CREATE TABLE uuid_test (id uuid PRIMARY KEY);
+CREATE TABLE uuid_test (id uuid);
 CREATE UNIQUE INDEX uidx_uuid_test_id ON uuid_test (id uuid_timestamp_ops);
 INSERT INTO uuid_test (id) VALUES
 ('1004cd50-4241-11e9-b3ab-db6f0f573554'), -- 2019-03-09 07:58:02.056840
@@ -143,4 +143,13 @@ SELECT count(*) FROM uuid_test WHERE id <~ '2019-06-11 10:02:19Z';
          Index Cond: (id <~ 'Tue Jun 11 19:02:19 2019 JST'::timestamp with time zone)
          Heap Fetches: 2
 (4 rows)
+
+EXPLAIN (ANALYZE, TIMING OFF, SUMMARY OFF, COSTS OFF)
+SELECT * FROM uuid_test WHERE id = '000e1df0-8c30-11e9-9bb8-e03f4977f7b7';
+                                  QUERY PLAN                                  
+------------------------------------------------------------------------------
+ Index Only Scan using uidx_uuid_test_id on uuid_test (actual rows=1 loops=1)
+   Index Cond: (id = '000e1df0-8c30-11e9-9bb8-e03f4977f7b7'::uuid)
+   Heap Fetches: 1
+(3 rows)
 

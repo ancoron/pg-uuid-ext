@@ -300,13 +300,14 @@ PARALLEL SAFE;
 
 COMMENT ON FUNCTION uuid_timestamp_only_cmp(uuid, timestamp with time zone) IS 'UUID v1 comparison function for timestamps';
 
+-- create operator class
 CREATE OPERATOR CLASS uuid_timestamp_ops FOR TYPE uuid
     USING btree AS
         OPERATOR        1       <*,
         OPERATOR        1       <~ (uuid, timestamp with time zone),
         OPERATOR        2       <=*,
         OPERATOR        2       <=~ (uuid, timestamp with time zone),
-        OPERATOR        3       =*,
+        OPERATOR        3       =,
         OPERATOR        3       =~ (uuid, timestamp with time zone),
         OPERATOR        4       >=*,
         OPERATOR        4       >=~ (uuid, timestamp with time zone),

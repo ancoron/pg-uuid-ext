@@ -46,7 +46,7 @@ SELECT
     uuid_timestamp_cmp('8385ded2-8dbb-11e9-ae2b-db6f0f573555', '8385ded2-8dbb-11e9-ae2b-db6f0f573554') AS gt_node
 ;
 
-CREATE TABLE uuid_test (id uuid PRIMARY KEY);
+CREATE TABLE uuid_test (id uuid);
 CREATE UNIQUE INDEX uidx_uuid_test_id ON uuid_test (id uuid_timestamp_ops);
 
 INSERT INTO uuid_test (id) VALUES
@@ -93,3 +93,6 @@ SET enable_seqscan TO off;
 SET timezone TO 'Asia/Tokyo';
 EXPLAIN (ANALYZE, TIMING OFF, SUMMARY OFF, COSTS OFF)
 SELECT count(*) FROM uuid_test WHERE id <~ '2019-06-11 10:02:19Z';
+
+EXPLAIN (ANALYZE, TIMING OFF, SUMMARY OFF, COSTS OFF)
+SELECT * FROM uuid_test WHERE id = '000e1df0-8c30-11e9-9bb8-e03f4977f7b7';
