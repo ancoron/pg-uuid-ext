@@ -1,6 +1,4 @@
 /*
- * Copyright 2019 Ancoron Luciferis <ancoron.luciferis@gmail.com>.
- *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -300,6 +298,19 @@ PARALLEL SAFE;
 
 COMMENT ON FUNCTION uuid_timestamp_only_cmp(uuid, timestamp with time zone) IS 'UUID v1 comparison function for timestamps';
 
+-- sort support function
+CREATE FUNCTION uuid_timestamp_sortsupport(internal)
+RETURNS void
+AS 'MODULE_PATHNAME', 'uuid_timestamp_sortsupport'
+LANGUAGE C
+IMMUTABLE
+LEAKPROOF
+STRICT
+PARALLEL SAFE;
+
+COMMENT ON FUNCTION uuid_timestamp_sortsupport(internal) IS 'btree sort support function';
+
+
 -- create operator class
 CREATE OPERATOR CLASS uuid_timestamp_ops FOR TYPE uuid
     USING btree AS
@@ -314,5 +325,6 @@ CREATE OPERATOR CLASS uuid_timestamp_ops FOR TYPE uuid
         OPERATOR        5       >*,
         OPERATOR        5       >~ (uuid, timestamp with time zone),
         FUNCTION        1       uuid_timestamp_cmp(uuid, uuid),
-        FUNCTION        1       uuid_timestamp_only_cmp(uuid, timestamp with time zone)
+        FUNCTION        1       uuid_timestamp_only_cmp(uuid, timestamp with time zone),
+        FUNCTION        2       uuid_timestamp_sortsupport(internal)
 ;

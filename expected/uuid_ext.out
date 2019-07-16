@@ -153,3 +153,13 @@ SELECT * FROM uuid_test WHERE id = '000e1df0-8c30-11e9-9bb8-e03f4977f7b7';
    Heap Fetches: 1
 (3 rows)
 
+EXPLAIN (ANALYZE, TIMING OFF, SUMMARY OFF, COSTS OFF)
+SELECT id FROM uuid_test WHERE id <* '002335f0-8c30-11e9-9bb8-e03f4977f7b7' ORDER BY id USING >* LIMIT 3 OFFSET 1;
+                                         QUERY PLAN                                          
+---------------------------------------------------------------------------------------------
+ Limit (actual rows=3 loops=1)
+   ->  Index Only Scan Backward using uidx_uuid_test_id on uuid_test (actual rows=4 loops=1)
+         Index Cond: (id <* '002335f0-8c30-11e9-9bb8-e03f4977f7b7'::uuid)
+         Heap Fetches: 4
+(4 rows)
+

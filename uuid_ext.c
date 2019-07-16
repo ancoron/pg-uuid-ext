@@ -1,6 +1,4 @@
 /*
- * Copyright 2019 Ancoron Luciferis
- *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -31,7 +29,14 @@
 #include "utils/timestamp.h"
 #include "utils/uuid.h"
 
-#define UUID_TIME_OFFSET            INT64CONST(122192928000000000)
+/*
+ * The time offset between the UUID timestamp and the PostgreSQL epoch in
+ * microsecond precision.
+ *
+ * This constant is the result of the following expression:
+ * `122192928000000000 / 10 + ((POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * SECS_PER_DAY * USECS_PER_SEC)`
+ */
+#define PG_UUID_OFFSET              INT64CONST(13165977600000000)
 
 #define UUID_VARIANT_NCS            (0x00)
 #define UUID_VARIANT_RFC4122        (0x01)
@@ -46,6 +51,15 @@
 
 PG_MODULE_MAGIC;
 
+/* sortsupport for uuid */
+typedef struct
+{
+	int64 input_count; /* number of non-null values seen */
+	bool estimating; /* true if estimating cardinality */
+
+	hyperLogLogState abbr_card; /* cardinality estimator */
+} uuid_ts_sortsupport_state;
+
 static uint8 uuid_version_internal(const pg_uuid_t *uuid);
 static uint8 uuid_variant_internal(const pg_uuid_t *uuid);
 static bool uuid_is_rfc_v1_internal(const pg_uuid_t *uuid);
@@ -54,10 +68,17 @@ static TimestampTz uuid_v1_timestamp1(const pg_uuid_t *uuid);
 static int uuid_ts_cmp0(const pg_uuid_t *a, const pg_uuid_t *b);
 static int uuid_ts_only_cmp0(const pg_uuid_t *a, const TimestampTz b);
 
+static int uuid_ts_cmp_abbrev(Datum x, Datum y, SortSupport ssup);
+static bool uuid_ts_abbrev_abort(int memtupcount, SortSupport ssup);
+static Datum uuid_ts_abbrev_convert(Datum original, SortSupport ssup);
+static int uuid_ts_sort_cmp(Datum x, Datum y, SortSupport ssup);
+
 PG_FUNCTION_INFO_V1(uuid_v1_timestamp);
 PG_FUNCTION_INFO_V1(uuid_version);
 PG_FUNCTION_INFO_V1(uuid_variant);
 PG_FUNCTION_INFO_V1(uuid_v1_node);
+
+PG_FUNCTION_INFO_V1(uuid_timestamp_sortsupport);
 
 PG_FUNCTION_INFO_V1(uuid_timestamp_cmp);
 PG_FUNCTION_INFO_V1(uuid_timestamp_eq);
@@ -78,57 +99,57 @@ PG_FUNCTION_INFO_V1(uuid_timestamp_only_ge);
 static uint8
 uuid_version_internal(const pg_uuid_t *uuid)
 {
-    return UUID_VERSION(uuid);
+	return UUID_VERSION(uuid);
 }
 
 static uint8
 uuid_variant_internal(const pg_uuid_t *uuid)
 {
-    if (UUID_VARIANT_IS_RFC4122(uuid))
-        return UUID_VARIANT_RFC4122;
+	if (UUID_VARIANT_IS_RFC4122(uuid))
+		return UUID_VARIANT_RFC4122;
 
-    if (UUID_VARIANT_IS_GUID(uuid))
-        return UUID_VARIANT_GUID;
+	if (UUID_VARIANT_IS_GUID(uuid))
+		return UUID_VARIANT_GUID;
 
-    if (UUID_VARIANT_IS_NCS(uuid))
-        return UUID_VARIANT_NCS;
+	if (UUID_VARIANT_IS_NCS(uuid))
+		return UUID_VARIANT_NCS;
 
-    return UUID_VARIANT_FUTURE;
+	return UUID_VARIANT_FUTURE;
 }
 
 static bool
 uuid_is_rfc_v1_internal(const pg_uuid_t *uuid)
 {
-    return 1 == UUID_VERSION(uuid) && UUID_VARIANT_IS_RFC4122(uuid);
+	return 1 == UUID_VERSION(uuid) && UUID_VARIANT_IS_RFC4122(uuid);
 }
 
-static int64 uuid_v1_timestamp0(const pg_uuid_t *uuid)
+/*
+ * Extract and un-shuffle the 60 bits (version 1) UUID timestamp.
+ */
+static int64
+uuid_v1_timestamp0(const pg_uuid_t *uuid)
 {
-    int64 timestamp = 0L;
+	/* UUID timestamp is encoded in network byte order */
+	int64 timestamp = pg_bswap64(*(int64 *) uuid->data);
 
-    /* extract shuffled 60 bits to get the UUID timestamp */
-    timestamp |= ( ((int64) uuid->data[6] & 0x0F) << 56 );
-    timestamp |= ( ((int64) uuid->data[7]) << 48 );
-    timestamp |= ( ((int64) uuid->data[4]) << 40 );
-    timestamp |= ( ((int64) uuid->data[5]) << 32 );
-    timestamp |= ( ((int64) uuid->data[0]) << 24 );
-    timestamp |= ( ((int64) uuid->data[1]) << 16 );
-    timestamp |= ( ((int64) uuid->data[2]) << 8 );
-    timestamp |=   ((int64) uuid->data[3]);
+	timestamp = (
+			((timestamp << 48) & 0x0FFF000000000000) |
+			((timestamp << 16) & 0x0000FFFF00000000) |
+			((timestamp >> 32) & 0x00000000FFFFFFFF));
 
-    return timestamp;
+	return timestamp;
 }
 
-static TimestampTz uuid_v1_timestamp1(const pg_uuid_t *uuid)
+/*
+ * Extract the timestamp from a version 1 UUID.
+ */
+static TimestampTz
+uuid_v1_timestamp1(const pg_uuid_t *uuid)
 {
-    TimestampTz timestamp = uuid_v1_timestamp0(uuid);
+	/* from 100 ns precision to PostgreSQL epoch */
+	TimestampTz timestamp = uuid_v1_timestamp0(uuid) / 10 - PG_UUID_OFFSET;
 
-    /* from 100 ns precision to PostgreSQL epoch */
-    timestamp -= UUID_TIME_OFFSET;
-    timestamp /= 10;
-    timestamp -= ((POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * SECS_PER_DAY * USECS_PER_SEC);
-
-    return timestamp;
+	return timestamp;
 }
 
 /*
@@ -139,23 +160,23 @@ static TimestampTz uuid_v1_timestamp1(const pg_uuid_t *uuid)
 Datum
 uuid_v1_timestamp(PG_FUNCTION_ARGS)
 {
-    TimestampTz         timestamp = 0L;
-	pg_uuid_t           *uuid = PG_GETARG_UUID_P(0);
+	TimestampTz timestamp = 0L;
+	pg_uuid_t *uuid = PG_GETARG_UUID_P(0);
 
-    if (PG_ARGISNULL(0))
-        PG_RETURN_NULL();
+	if (PG_ARGISNULL(0))
+		PG_RETURN_NULL();
 
-    /* version and variant check */
-    if (!uuid_is_rfc_v1_internal(uuid))
-        PG_RETURN_NULL();
+	/* version and variant check */
+	if (!uuid_is_rfc_v1_internal(uuid))
+		PG_RETURN_NULL();
 
-    timestamp = uuid_v1_timestamp1(uuid);
+	timestamp = uuid_v1_timestamp1(uuid);
 
-    /* Recheck in case roundoff produces something just out of range */
-    if (!IS_VALID_TIMESTAMP(timestamp))
-        ereport(ERROR,
-                (errcode(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
-                 errmsg("timestamp out of range")));
+	/* Recheck in case roundoff produces something just out of range */
+	if (!IS_VALID_TIMESTAMP(timestamp))
+		ereport(ERROR,
+			(errcode(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
+			errmsg("timestamp out of range")));
 
 	PG_RETURN_TIMESTAMP(timestamp);
 }
@@ -170,10 +191,10 @@ uuid_version(PG_FUNCTION_ARGS)
 {
 	pg_uuid_t *uuid = PG_GETARG_UUID_P(0);
 
-    if (PG_ARGISNULL(0))
-        PG_RETURN_NULL();
+	if (PG_ARGISNULL(0))
+		PG_RETURN_NULL();
 
-    PG_RETURN_TIMESTAMP(uuid_version_internal(uuid));
+	PG_RETURN_TIMESTAMP(uuid_version_internal(uuid));
 }
 
 /*
@@ -186,10 +207,10 @@ uuid_variant(PG_FUNCTION_ARGS)
 {
 	pg_uuid_t *uuid = PG_GETARG_UUID_P(0);
 
-    if (PG_ARGISNULL(0))
-        PG_RETURN_NULL();
+	if (PG_ARGISNULL(0))
+		PG_RETURN_NULL();
 
-    PG_RETURN_TIMESTAMP(uuid_variant_internal(uuid));
+	PG_RETURN_TIMESTAMP(uuid_variant_internal(uuid));
 }
 
 /*
@@ -200,23 +221,23 @@ uuid_variant(PG_FUNCTION_ARGS)
 Datum
 uuid_v1_node(PG_FUNCTION_ARGS)
 {
-	pg_uuid_t        *uuid = PG_GETARG_UUID_P(0);
+	pg_uuid_t *uuid = PG_GETARG_UUID_P(0);
 	static const char hex_chars[] = "0123456789abcdef";
-	char*             node = malloc(13);
-	int               i;
-	int               j = 0;
+	char* node = malloc(13);
+	int i;
+	int j = 0;
 
-    if (PG_ARGISNULL(0))
-        PG_RETURN_NULL();
+	if (PG_ARGISNULL(0))
+		PG_RETURN_NULL();
 
-    /* version and variant check */
-    if (!uuid_is_rfc_v1_internal(uuid))
-        PG_RETURN_NULL();
+	/* version and variant check */
+	if (!uuid_is_rfc_v1_internal(uuid))
+		PG_RETURN_NULL();
 
 	for (i = 10; i < UUID_LEN; i++)
 	{
-		int			hi;
-		int			lo;
+		int hi;
+		int lo;
 
 		hi = uuid->data[i] >> 4;
 		lo = uuid->data[i] & 0x0F;
@@ -225,7 +246,7 @@ uuid_v1_node(PG_FUNCTION_ARGS)
 		node[j++] = hex_chars[lo];
 	}
 
-    node[j++] = '\0';
+	node[j++] = '\0';
 
 	PG_RETURN_TEXT_P(cstring_to_text(node));
 }
@@ -233,27 +254,31 @@ uuid_v1_node(PG_FUNCTION_ARGS)
 static int
 uuid_ts_cmp0(const pg_uuid_t *a, const pg_uuid_t *b)
 {
-    int64 diff;
+	int64 diff;
 
-    diff = uuid_version_internal(a) - uuid_version_internal(b);
-    if (diff < 0)
-        return -1;
-    else if (diff > 0)
-        return 1;
+	uint8 version = uuid_version_internal(a);
+	diff = version - uuid_version_internal(b);
+	if (diff < 0)
+		return -1;
+	else if (diff > 0)
+		return 1;
 
-    diff = uuid_v1_timestamp0(a) - uuid_v1_timestamp0(b);
-    if (diff < 0)
-        return -1;
-    else if (diff > 0)
-        return 1;
+	if (version == 1)
+	{
+		diff = uuid_v1_timestamp0(a) - uuid_v1_timestamp0(b);
+		if (diff < 0)
+			return -1;
+		else if (diff > 0)
+			return 1;
+	}
 
-    /* timestamp equals so just compare on memory */
-    diff = memcmp(a, b, UUID_LEN);
-    if (diff < 0)
-        return -1;
-    else if (diff > 0)
-        return 1;
-    return 0;
+	/* timestamp equals so just compare on memory */
+	diff = memcmp(a, b, UUID_LEN);
+	if (diff < 0)
+		return -1;
+	else if (diff > 0)
+		return 1;
+	return 0;
 }
 
 Datum
@@ -262,7 +287,7 @@ uuid_timestamp_cmp(PG_FUNCTION_ARGS)
 	pg_uuid_t *a = PG_GETARG_UUID_P(0);
 	pg_uuid_t *b = PG_GETARG_UUID_P(1);
 
-    PG_RETURN_INT32(uuid_ts_cmp0(a, b));
+	PG_RETURN_INT32(uuid_ts_cmp0(a, b));
 }
 
 Datum
@@ -271,7 +296,7 @@ uuid_timestamp_eq(PG_FUNCTION_ARGS)
 	pg_uuid_t *a = PG_GETARG_UUID_P(0);
 	pg_uuid_t *b = PG_GETARG_UUID_P(1);
 
-    PG_RETURN_BOOL(memcmp(a, b, UUID_LEN) == 0);
+	PG_RETURN_BOOL(memcmp(a, b, UUID_LEN) == 0);
 }
 
 Datum
@@ -280,7 +305,7 @@ uuid_timestamp_ne(PG_FUNCTION_ARGS)
 	pg_uuid_t *a = PG_GETARG_UUID_P(0);
 	pg_uuid_t *b = PG_GETARG_UUID_P(1);
 
-    PG_RETURN_BOOL(memcmp(a, b, UUID_LEN) != 0);
+	PG_RETURN_BOOL(memcmp(a, b, UUID_LEN) != 0);
 }
 
 Datum
@@ -289,7 +314,7 @@ uuid_timestamp_lt(PG_FUNCTION_ARGS)
 	pg_uuid_t *a = PG_GETARG_UUID_P(0);
 	pg_uuid_t *b = PG_GETARG_UUID_P(1);
 
-    PG_RETURN_BOOL(uuid_ts_cmp0(a, b) < 0);
+	PG_RETURN_BOOL(uuid_ts_cmp0(a, b) < 0);
 }
 
 Datum
@@ -298,7 +323,7 @@ uuid_timestamp_le(PG_FUNCTION_ARGS)
 	pg_uuid_t *a = PG_GETARG_UUID_P(0);
 	pg_uuid_t *b = PG_GETARG_UUID_P(1);
 
-    PG_RETURN_BOOL(uuid_ts_cmp0(a, b) <= 0);
+	PG_RETURN_BOOL(uuid_ts_cmp0(a, b) <= 0);
 }
 
 Datum
@@ -307,7 +332,7 @@ uuid_timestamp_gt(PG_FUNCTION_ARGS)
 	pg_uuid_t *a = PG_GETARG_UUID_P(0);
 	pg_uuid_t *b = PG_GETARG_UUID_P(1);
 
-    PG_RETURN_BOOL(uuid_ts_cmp0(a, b) > 0);
+	PG_RETURN_BOOL(uuid_ts_cmp0(a, b) > 0);
 }
 
 Datum
@@ -316,16 +341,16 @@ uuid_timestamp_ge(PG_FUNCTION_ARGS)
 	pg_uuid_t *a = PG_GETARG_UUID_P(0);
 	pg_uuid_t *b = PG_GETARG_UUID_P(1);
 
-    PG_RETURN_BOOL(uuid_ts_cmp0(a, b) >= 0);
+	PG_RETURN_BOOL(uuid_ts_cmp0(a, b) >= 0);
 }
 
 static int
 uuid_ts_only_cmp0(const pg_uuid_t *a, const TimestampTz b)
 {
-    if (!uuid_is_rfc_v1_internal(a))
-        return -1;
+	if (!uuid_is_rfc_v1_internal(a))
+		return -1;
 
-    return timestamptz_cmp_internal(uuid_v1_timestamp1(a), b);
+	return timestamptz_cmp_internal(uuid_v1_timestamp1(a), b);
 }
 
 Datum
@@ -334,7 +359,7 @@ uuid_timestamp_only_cmp(PG_FUNCTION_ARGS)
 	pg_uuid_t *a = PG_GETARG_UUID_P(0);
 	TimestampTz b = PG_GETARG_TIMESTAMPTZ(1);
 
-    PG_RETURN_INT32(uuid_ts_only_cmp0(a, b));
+	PG_RETURN_INT32(uuid_ts_only_cmp0(a, b));
 }
 
 Datum
@@ -343,7 +368,7 @@ uuid_timestamp_only_eq(PG_FUNCTION_ARGS)
 	pg_uuid_t *a = PG_GETARG_UUID_P(0);
 	TimestampTz b = PG_GETARG_TIMESTAMPTZ(1);
 
-    PG_RETURN_BOOL(uuid_ts_only_cmp0(a, b) == 0);
+	PG_RETURN_BOOL(uuid_ts_only_cmp0(a, b) == 0);
 }
 
 Datum
@@ -352,7 +377,7 @@ uuid_timestamp_only_ne(PG_FUNCTION_ARGS)
 	pg_uuid_t *a = PG_GETARG_UUID_P(0);
 	TimestampTz b = PG_GETARG_TIMESTAMPTZ(1);
 
-    PG_RETURN_BOOL(uuid_ts_only_cmp0(a, b) != 0);
+	PG_RETURN_BOOL(uuid_ts_only_cmp0(a, b) != 0);
 }
 
 Datum
@@ -361,7 +386,7 @@ uuid_timestamp_only_lt(PG_FUNCTION_ARGS)
 	pg_uuid_t *a = PG_GETARG_UUID_P(0);
 	TimestampTz b = PG_GETARG_TIMESTAMPTZ(1);
 
-    PG_RETURN_BOOL(uuid_ts_only_cmp0(a, b) < 0);
+	PG_RETURN_BOOL(uuid_ts_only_cmp0(a, b) < 0);
 }
 
 Datum
@@ -370,7 +395,7 @@ uuid_timestamp_only_le(PG_FUNCTION_ARGS)
 	pg_uuid_t *a = PG_GETARG_UUID_P(0);
 	TimestampTz b = PG_GETARG_TIMESTAMPTZ(1);
 
-    PG_RETURN_BOOL(uuid_ts_only_cmp0(a, b) <= 0);
+	PG_RETURN_BOOL(uuid_ts_only_cmp0(a, b) <= 0);
 }
 
 Datum
@@ -379,7 +404,7 @@ uuid_timestamp_only_gt(PG_FUNCTION_ARGS)
 	pg_uuid_t *a = PG_GETARG_UUID_P(0);
 	TimestampTz b = PG_GETARG_TIMESTAMPTZ(1);
 
-    PG_RETURN_BOOL(uuid_ts_only_cmp0(a, b) > 0);
+	PG_RETURN_BOOL(uuid_ts_only_cmp0(a, b) > 0);
 }
 
 Datum
@@ -388,6 +413,203 @@ uuid_timestamp_only_ge(PG_FUNCTION_ARGS)
 	pg_uuid_t *a = PG_GETARG_UUID_P(0);
 	TimestampTz b = PG_GETARG_TIMESTAMPTZ(1);
 
-    PG_RETURN_BOOL(uuid_ts_only_cmp0(a, b) >= 0);
+	PG_RETURN_BOOL(uuid_ts_only_cmp0(a, b) >= 0);
 }
 
+
+/*
+ * Parts of below code have been shamelessly copied (and modified) from:
+ *	  src/backend/utils/adt/uuid.c
+ *
+ * ...and are:
+ * Copyright (c) 2007-2019, PostgreSQL Global Development Group
+ */
+
+/*
+ * Sort support strategy routine
+ */
+Datum
+uuid_timestamp_sortsupport(PG_FUNCTION_ARGS)
+{
+	SortSupport ssup = (SortSupport) PG_GETARG_POINTER(0);
+
+	ssup->comparator = uuid_ts_sort_cmp;
+	ssup->ssup_extra = NULL;
+
+	if (ssup->abbreviate)
+	{
+		uuid_ts_sortsupport_state *uss;
+		MemoryContext oldcontext;
+
+		oldcontext = MemoryContextSwitchTo(ssup->ssup_cxt);
+
+		uss = palloc(sizeof(uuid_ts_sortsupport_state));
+		uss->input_count = 0;
+		uss->estimating = true;
+		initHyperLogLog(&uss->abbr_card, 10);
+
+		ssup->ssup_extra = uss;
+
+		ssup->comparator = uuid_ts_cmp_abbrev;
+		ssup->abbrev_converter = uuid_ts_abbrev_convert;
+		ssup->abbrev_abort = uuid_ts_abbrev_abort;
+		ssup->abbrev_full_comparator = uuid_ts_sort_cmp;
+
+		MemoryContextSwitchTo(oldcontext);
+	}
+
+	PG_RETURN_VOID();
+}
+
+/*
+ * SortSupport comparison func
+ */
+static int
+uuid_ts_sort_cmp(Datum x, Datum y, SortSupport ssup)
+{
+	pg_uuid_t *arg1 = DatumGetUUIDP(x);
+	pg_uuid_t *arg2 = DatumGetUUIDP(y);
+
+	return uuid_ts_cmp0(arg1, arg2);
+}
+
+/*
+ * Conversion routine for sortsupport.
+ *
+ * Converts original uuid representation to abbreviated key representation.
+ *
+ * Our encoding strategy is simple: if the UUID is an RFC 4122 version 1 then
+ * extract the 60-bit timestamp. Otherwise, pack the first `sizeof(Datum)`
+ * bytes of uuid data into a Datum (on little-endian machines, the bytes are
+ * stored in reverse order), and treat it as an unsigned integer.
+ */
+static Datum
+uuid_ts_abbrev_convert(Datum original, SortSupport ssup)
+{
+	uuid_ts_sortsupport_state *uss = ssup->ssup_extra;
+	pg_uuid_t *authoritative = DatumGetUUIDP(original);
+	Datum res;
+
+#if SIZEOF_DATUM == 8
+	if (uuid_is_rfc_v1_internal(authoritative))
+	{
+		int64 timestamp = uuid_v1_timestamp0(authoritative);
+		memcpy(&res, &timestamp, sizeof(Datum));
+	}
+	else
+	{
+		memcpy(&res, authoritative->data, sizeof(Datum));
+	}
+#else       /* SIZEOF_DATUM != 8 */
+	/*
+	 * First 4 bytes are already the most significant bits.
+	 */
+	memcpy(&res, authoritative->data, sizeof(Datum));
+#endif
+
+	uss->input_count += 1;
+
+	if (uss->estimating)
+	{
+		uint32 tmp;
+
+#if SIZEOF_DATUM == 8
+		tmp = (uint32) res ^ (uint32) ((uint64) res >> 32);
+#else       /* SIZEOF_DATUM != 8 */
+		tmp = (uint32) res;
+#endif
+
+		addHyperLogLog(&uss->abbr_card, DatumGetUInt32(hash_uint32(tmp)));
+	}
+
+	/*
+	 * Byteswap on little-endian machines.
+	 *
+	 * This is needed so that uuid_ts_cmp_abbrev() (an unsigned integer 3-way
+	 * comparator) works correctly on all platforms.  If we didn't do this,
+	 * the comparator would have to call memcmp() with a pair of pointers to
+	 * the first byte of each abbreviated key, which is slower.
+	 */
+	res = DatumBigEndianToNative(res);
+
+	return res;
+}
+
+/*
+ * Abbreviated key comparison func
+ */
+static int
+uuid_ts_cmp_abbrev(Datum x, Datum y, SortSupport ssup)
+{
+	if (x > y)
+		return 1;
+	else if (x == y)
+		return 0;
+	else
+		return -1;
+}
+
+/*
+ * Callback for estimating effectiveness of abbreviated key optimization.
+ *
+ * We pay no attention to the cardinality of the non-abbreviated data, because
+ * there is no equality fast-path within authoritative uuid comparator.
+ */
+static bool
+uuid_ts_abbrev_abort(int memtupcount, SortSupport ssup)
+{
+	uuid_ts_sortsupport_state *uss = ssup->ssup_extra;
+	double abbr_card;
+
+	if (memtupcount < 10000 || uss->input_count < 10000 || !uss->estimating)
+		return false;
+
+	abbr_card = estimateHyperLogLog(&uss->abbr_card);
+
+	/*
+	 * If we have >100k distinct values, then even if we were sorting many
+	 * billion rows we'd likely still break even, and the penalty of undoing
+	 * that many rows of abbrevs would probably not be worth it.  Stop even
+	 * counting at that point.
+	 */
+	if (abbr_card > 100000.0)
+	{
+#ifdef TRACE_SORT
+		if (trace_sort)
+			elog(LOG,
+				"uuid_ts_abbrev: estimation ends at cardinality %f"
+				" after " INT64_FORMAT " values (%d rows)",
+				abbr_card, uss->input_count, memtupcount);
+#endif
+		uss->estimating = false;
+		return false;
+	}
+
+	/*
+	 * Target minimum cardinality is 1 per ~2k of non-null inputs.  0.5 row
+	 * fudge factor allows us to abort earlier on genuinely pathological data
+	 * where we've had exactly one abbreviated value in the first 2k
+	 * (non-null) rows.
+	 */
+	if (abbr_card < uss->input_count / 2000.0 + 0.5)
+	{
+#ifdef TRACE_SORT
+		if (trace_sort)
+			elog(LOG,
+				"uuid_ts_abbrev: aborting abbreviation at cardinality %f"
+				" below threshold %f after " INT64_FORMAT " values (%d rows)",
+				abbr_card, uss->input_count / 2000.0 + 0.5, uss->input_count,
+				memtupcount);
+#endif
+		return true;
+	}
+
+#ifdef TRACE_SORT
+	if (trace_sort)
+		elog(LOG,
+			"uuid_ts_abbrev: cardinality %f after " INT64_FORMAT
+			" values (%d rows)", abbr_card, uss->input_count, memtupcount);
+#endif
+
+	return false;
+}
