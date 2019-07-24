@@ -28,26 +28,7 @@
 #include "utils/sortsupport.h"
 #include "utils/timestamp.h"
 #include "utils/uuid.h"
-
-/*
- * The time offset between the UUID timestamp and the PostgreSQL epoch in
- * microsecond precision.
- *
- * This constant is the result of the following expression:
- * `122192928000000000 / 10 + ((POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * SECS_PER_DAY * USECS_PER_SEC)`
- */
-#define PG_UUID_OFFSET              INT64CONST(13165977600000000)
-
-#define UUID_VARIANT_NCS            (0x00)
-#define UUID_VARIANT_RFC4122        (0x01)
-#define UUID_VARIANT_GUID           (0x02)
-#define UUID_VARIANT_FUTURE         (0x03)
-
-#define UUID_VERSION(uuid)              ((uuid->data[6] >> 4) & 0x0F)
-#define UUID_VARIANT_IS_NCS(uuid)       (((uuid->data[8]) & 0x80) == 0x00)
-#define UUID_VARIANT_IS_RFC4122(uuid)   (((uuid->data[8]) & 0xC0) == 0x80)
-#define UUID_VARIANT_IS_GUID(uuid)      (((uuid->data[8]) & 0xE0) == 0xC0)
-#define UUID_VARIANT_IS_FUTURE(uuid)    (((uuid->data[8]) & 0xE0) == 0xE0)
+#include "uuid_ext.h"
 
 PG_MODULE_MAGIC;
 
@@ -60,9 +41,6 @@ typedef struct
 	hyperLogLogState abbr_card; /* cardinality estimator */
 } uuid_ts_sortsupport_state;
 
-static uint8 uuid_version_internal(const pg_uuid_t *uuid);
-static uint8 uuid_variant_internal(const pg_uuid_t *uuid);
-static bool uuid_is_rfc_v1_internal(const pg_uuid_t *uuid);
 static int64 uuid_v1_timestamp0(const pg_uuid_t *uuid);
 static TimestampTz uuid_v1_timestamp1(const pg_uuid_t *uuid);
 static int uuid_ts_cmp0(const pg_uuid_t *a, const pg_uuid_t *b);
@@ -96,14 +74,18 @@ PG_FUNCTION_INFO_V1(uuid_timestamp_only_le);
 PG_FUNCTION_INFO_V1(uuid_timestamp_only_gt);
 PG_FUNCTION_INFO_V1(uuid_timestamp_only_ge);
 
-static uint8
-uuid_version_internal(const pg_uuid_t *uuid)
+/*
+ * External functions first.
+ */
+
+uint8
+uuid_get_version(const pg_uuid_t *uuid)
 {
 	return UUID_VERSION(uuid);
 }
 
-static uint8
-uuid_variant_internal(const pg_uuid_t *uuid)
+uint8
+uuid_get_variant(const pg_uuid_t *uuid)
 {
 	if (UUID_VARIANT_IS_RFC4122(uuid))
 		return UUID_VARIANT_RFC4122;
@@ -117,8 +99,8 @@ uuid_variant_internal(const pg_uuid_t *uuid)
 	return UUID_VARIANT_FUTURE;
 }
 
-static bool
-uuid_is_rfc_v1_internal(const pg_uuid_t *uuid)
+bool
+uuid_is_rfc_v1(const pg_uuid_t *uuid)
 {
 	return 1 == UUID_VERSION(uuid) && UUID_VARIANT_IS_RFC4122(uuid);
 }
@@ -130,7 +112,7 @@ static int64
 uuid_v1_timestamp0(const pg_uuid_t *uuid)
 {
 	/* UUID timestamp is encoded in network byte order */
-	int64 timestamp = pg_bswap64(*(int64 *) uuid->data);
+	int64 timestamp = pg_ntoh64(*(int64 *) uuid->data);
 
 	timestamp = (
 			((timestamp << 48) & 0x0FFF000000000000) |
@@ -167,7 +149,7 @@ uuid_v1_timestamp(PG_FUNCTION_ARGS)
 		PG_RETURN_NULL();
 
 	/* version and variant check */
-	if (!uuid_is_rfc_v1_internal(uuid))
+	if (!uuid_is_rfc_v1(uuid))
 		PG_RETURN_NULL();
 
 	timestamp = uuid_v1_timestamp1(uuid);
@@ -194,7 +176,7 @@ uuid_version(PG_FUNCTION_ARGS)
 	if (PG_ARGISNULL(0))
 		PG_RETURN_NULL();
 
-	PG_RETURN_TIMESTAMP(uuid_version_internal(uuid));
+	PG_RETURN_TIMESTAMP(uuid_get_version(uuid));
 }
 
 /*
@@ -210,7 +192,7 @@ uuid_variant(PG_FUNCTION_ARGS)
 	if (PG_ARGISNULL(0))
 		PG_RETURN_NULL();
 
-	PG_RETURN_TIMESTAMP(uuid_variant_internal(uuid));
+	PG_RETURN_TIMESTAMP(uuid_get_variant(uuid));
 }
 
 /*
@@ -223,7 +205,7 @@ uuid_v1_node(PG_FUNCTION_ARGS)
 {
 	pg_uuid_t *uuid = PG_GETARG_UUID_P(0);
 	static const char hex_chars[] = "0123456789abcdef";
-	char* node = malloc(13);
+	char* node = palloc(13);
 	int i;
 	int j = 0;
 
@@ -231,7 +213,7 @@ uuid_v1_node(PG_FUNCTION_ARGS)
 		PG_RETURN_NULL();
 
 	/* version and variant check */
-	if (!uuid_is_rfc_v1_internal(uuid))
+	if (!uuid_is_rfc_v1(uuid))
 		PG_RETURN_NULL();
 
 	for (i = 10; i < UUID_LEN; i++)
@@ -256,8 +238,8 @@ uuid_ts_cmp0(const pg_uuid_t *a, const pg_uuid_t *b)
 {
 	int64 diff;
 
-	uint8 version = uuid_version_internal(a);
-	diff = version - uuid_version_internal(b);
+	uint8 version = uuid_get_version(a);
+	diff = version - uuid_get_version(b);
 	if (diff < 0)
 		return -1;
 	else if (diff > 0)
@@ -347,7 +329,7 @@ uuid_timestamp_ge(PG_FUNCTION_ARGS)
 static int
 uuid_ts_only_cmp0(const pg_uuid_t *a, const TimestampTz b)
 {
-	if (!uuid_is_rfc_v1_internal(a))
+	if (!uuid_is_rfc_v1(a))
 		return -1;
 
 	return timestamptz_cmp_internal(uuid_v1_timestamp1(a), b);
@@ -491,7 +473,7 @@ uuid_ts_abbrev_convert(Datum original, SortSupport ssup)
 	Datum res;
 
 #if SIZEOF_DATUM == 8
-	if (uuid_is_rfc_v1_internal(authoritative))
+	if (uuid_is_rfc_v1(authoritative))
 	{
 		int64 timestamp = uuid_v1_timestamp0(authoritative);
 		memcpy(&res, &timestamp, sizeof(Datum));
