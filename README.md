@@ -79,6 +79,23 @@ SELECT uuid_v1_node('b647e96b-862d-11e9-ae2b-db6f0f573554');
 (1 row)
 ```
 
+## uuid_generate_v1_at
+
+The function `uuid_generate_v1_at(timestamp with time zone)` uses the provided
+timestamp value to generate an [RFC 4122][1] version 1 UUID of PostgreSQL
+standard data type `uuid`:
+
+```sql
+SELECT uuid_generate_v1_at('2019-06-11 10:02:19.391640Z');
+         uuid_generate_v1_at          
+--------------------------------------
+ ffc44a0e-8c2f-11e9-8000-000000000000
+(1 row)
+```
+
+In case of providing a `NULL` argument, the function is not invoked and `NULL`
+is returned directly by PostgreSQL.
+
 
 # Build
 

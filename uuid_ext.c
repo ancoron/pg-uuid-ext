@@ -55,6 +55,7 @@ PG_FUNCTION_INFO_V1(uuid_v1_timestamp);
 PG_FUNCTION_INFO_V1(uuid_version);
 PG_FUNCTION_INFO_V1(uuid_variant);
 PG_FUNCTION_INFO_V1(uuid_v1_node);
+PG_FUNCTION_INFO_V1(generate_uuid_v1_at);
 
 PG_FUNCTION_INFO_V1(uuid_timestamp_sortsupport);
 
@@ -231,6 +232,31 @@ uuid_v1_node(PG_FUNCTION_ARGS)
 	node[j++] = '\0';
 
 	PG_RETURN_TEXT_P(cstring_to_text(node));
+}
+
+Datum
+generate_uuid_v1_at(PG_FUNCTION_ARGS)
+{
+	int64 timestamp = (int64) PG_GETARG_TIMESTAMPTZ(0);
+
+	pg_uuid_t *uuid;
+	uuid = (pg_uuid_t*) palloc0(UUID_LEN);
+	timestamp = (timestamp + PG_UUID_OFFSET) * 10;
+
+	/* shuffle timestamp bytes into low, mid, high and set version */
+	timestamp = (
+			((timestamp >> 48) & 0x0000000000000FFF) |
+			((timestamp >> 16) & 0x00000000FFFF0000) |
+			((timestamp << 32) & 0xFFFFFFFF00000000) | 0x1000);
+
+	/* convert to network byte order and copy into byte array */
+	timestamp = pg_hton64(timestamp);
+	memcpy(&(uuid->data)[0], &timestamp, 8);
+
+	/* set RFC variant bits */
+	uuid->data[8] = 0x80;
+
+	PG_RETURN_UUID_P(uuid);
 }
 
 static int

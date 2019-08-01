@@ -12,6 +12,14 @@ FROM uuid_v1_timestamp('4938f30e-8449-11e9-ae2b-e03f49467033') AS ts;
 date_part | 1559378590.74588
 to_char   | 2019-06-01 08:43:10.745883
 
+SELECT coalesce(uuid_generate_v1_at('2019-06-11 10:02:19.391640Z'), '00000000-0000-1234-0000-000000000000') AS gen_from_ts;
+-[ RECORD 1 ]-------------------------------------
+gen_from_ts | ffc449f0-8c2f-11e9-8000-000000000000
+
+SELECT coalesce(uuid_generate_v1_at(NULL), '00000000-0000-1234-0000-000000000000') AS gen_from_null;
+-[ RECORD 1 ]-+-------------------------------------
+gen_from_null | 00000000-0000-1234-0000-000000000000
+
 SELECT
     coalesce(to_char(uuid_v1_timestamp('87c771ce-bc95-3114-ae59-c0e26acf8e81'), 'YYYY-MM-DD HH24:MI:SS.US'), '<null>') AS ver_3,
     coalesce(to_char(uuid_v1_timestamp('22859369-3a4f-49ef-8264-1aaf0a953299'), 'YYYY-MM-DD HH24:MI:SS.US'), '<null>') AS ver_4,

@@ -6,6 +6,9 @@ FROM uuid_v1_timestamp('edb4d8f0-1a80-11e8-98d9-e03f49f7f8f3') AS ts;
 SELECT extract(epoch from ts), to_char(ts, 'YYYY-MM-DD HH24:MI:SS.US')
 FROM uuid_v1_timestamp('4938f30e-8449-11e9-ae2b-e03f49467033') AS ts;
 
+SELECT coalesce(uuid_generate_v1_at('2019-06-11 10:02:19.391640Z'), '00000000-0000-1234-0000-000000000000') AS gen_from_ts;
+SELECT coalesce(uuid_generate_v1_at(NULL), '00000000-0000-1234-0000-000000000000') AS gen_from_null;
+
 SELECT
     coalesce(to_char(uuid_v1_timestamp('87c771ce-bc95-3114-ae59-c0e26acf8e81'), 'YYYY-MM-DD HH24:MI:SS.US'), '<null>') AS ver_3,
     coalesce(to_char(uuid_v1_timestamp('22859369-3a4f-49ef-8264-1aaf0a953299'), 'YYYY-MM-DD HH24:MI:SS.US'), '<null>') AS ver_4,
